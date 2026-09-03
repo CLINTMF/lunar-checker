@@ -1,0 +1,11 @@
+:root{color-scheme:dark;--bg:#08090f;--panel:#121420;--line:#262a3b;--text:#f5f6ff;--muted:#9297ad;--accent:#9c7cff;--accent2:#66e3c4}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 20% 0,#21164b 0,transparent 32%),var(--bg);color:var(--text);font:15px/1.5 Inter,ui-sans-serif,system-ui,sans-serif}
+main{width:min(980px,calc(100% - 32px));margin:0 auto;padding:72px 0}.eyebrow{color:var(--accent2);font-weight:700;letter-spacing:.12em;text-transform:uppercase;font-size:12px}
+h1{font-size:clamp(42px,8vw,76px);line-height:.95;letter-spacing:-.06em;margin:14px 0 22px;max-width:700px}h1 span{color:var(--accent)}
+.intro{color:var(--muted);font-size:18px;max-width:580px}.search{display:flex;gap:10px;margin:36px 0 14px;max-width:640px}
+input,button{border:1px solid var(--line);border-radius:12px;font:inherit;padding:14px 16px}input{background:var(--panel);color:var(--text);flex:1;outline:none}input:focus{border-color:var(--accent)}button{background:var(--accent);color:#0d0919;border:0;font-weight:800;cursor:pointer}button:disabled{opacity:.6;cursor:wait}
+.hint{color:var(--muted);font-size:13px}.status{min-height:24px;color:var(--muted)}.error{color:#ff8585}.profile{display:none;margin-top:26px}.profile.show{display:block}
+.identity{display:flex;align-items:center;gap:18px}.avatar{width:72px;height:72px;border-radius:50%;border:2px solid var(--accent)}.name{font-size:24px;font-weight:800}.handle{color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:24px 0}.card,.repo,.api{background:rgba(18,20,32,.8);border:1px solid var(--line);border-radius:14px;padding:18px}.value{font-size:28px;font-weight:800}.label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+h2{font-size:18px;margin:32px 0 12px}.repos{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.repo a{color:var(--text);font-weight:700;text-decoration:none}.repo p{color:var(--muted);min-height:24px}.repo small{color:var(--accent2)}.api{margin-top:34px;color:var(--muted)}code{color:var(--accent2)}
+@media(max-width:650px){main{padding:40px 0}.search{flex-direction:column}.grid{grid-template-columns:repeat(2,1fr)}.repos{grid-template-columns:1fr}}
