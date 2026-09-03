@@ -1,89 +1,58 @@
 const $ = (id) => document.getElementById(id);
 const form = $("form");
 const button = $("button");
-const configuredApi = new URLSearchParams(location.search).get("api");
-const apiBase = (configuredApi || "https://api.github.com").replace(/\/$/, "");
-const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
-  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
-}[char]));
+let currentServer = "donut";
 
-async function getStats(username) {
-  if (configuredApi) {
-    const response = await fetch(`${apiBase}/stats/github/${encodeURIComponent(username)}`);
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error || "API request failed");
-    return { data: body.data, cached: body.cached, endpoint: `${apiBase}/stats/github/${encodeURIComponent(username)}` };
-  }
+const labels = {
+  donut: [
+    ["money", "Money", "◆"], ["shards", "Shards", "◇"], ["playtime", "Playtime", "◷"],
+    ["kills", "Kills", "⚔"], ["deaths", "Deaths", "✕"], ["kd", "K/D", "✦"],
+    ["blocksPlaced", "Blocks placed", "▦"], ["blocksBroken", "Blocks broken", "▧"],
+    ["mobsKilled", "Mobs killed", "☠"], ["moneySpent", "Money spent", "↘"], ["moneyMade", "Money made", "↗"]
+  ],
+  hypixel: [
+    ["networkLevel", "Network level", "✦"], ["karma", "Karma", "◇"], ["achievementPoints", "Achievements", "★"],
+    ["playing", "Current status", "●"]
+  ]
+};
 
-  const [profileResponse, reposResponse] = await Promise.all([
-    fetch(`https://api.github.com/users/${encodeURIComponent(username)}`),
-    fetch(`https://api.github.com/users/${encodeURIComponent(username)}/repos?per_page=100&sort=updated`)
-  ]);
-  const profile = await profileResponse.json();
-  const repos = await reposResponse.json();
-  if (!profileResponse.ok) {
-    if (profileResponse.status === 404) throw new Error("GitHub user not found");
-    if (profileResponse.status === 403) throw new Error("GitHub public API rate limit reached");
-    throw new Error(profile.message || "Could not fetch profile");
-  }
-  if (!reposResponse.ok) throw new Error(repos.message || "Could not fetch repositories");
+const apiBase = (new URLSearchParams(location.search).get("api") || location.origin).replace(/\/$/, "");
 
-  const owned = repos.filter((repo) => !repo.fork);
-  const languages = {};
-  owned.forEach((repo) => { if (repo.language) languages[repo.language] = (languages[repo.language] || 0) + 1; });
-  const sorted = [...owned].sort((a, b) => (b.stargazers_count - a.stargazers_count) || (b.forks_count - a.forks_count));
-  return {
-    cached: false,
-    endpoint: `https://api.github.com/users/${encodeURIComponent(username)}`,
-    data: {
-      platform: "github", username: profile.login, name: profile.name, avatar: profile.avatar_url,
-      profileUrl: profile.html_url, bio: profile.bio, company: profile.company, location: profile.location,
-      stats: {
-        followers: profile.followers, following: profile.following, publicRepos: profile.public_repos,
-        publicGists: profile.public_gists, totalStars: owned.reduce((sum, repo) => sum + repo.stargazers_count, 0),
-        totalForks: owned.reduce((sum, repo) => sum + repo.forks_count, 0),
-        openIssues: owned.reduce((sum, repo) => sum + repo.open_issues_count, 0), ownedRepos: owned.length
-      },
-      languages,
-      topRepos: sorted.slice(0, 10).map((repo) => ({
-        name: repo.name, description: repo.description, url: repo.html_url, stars: repo.stargazers_count,
-        forks: repo.forks_count, language: repo.language, updatedAt: repo.updated_at
-      }))
-    }
-  };
+function setServer(server) {
+  currentServer = server;
+  document.querySelectorAll(".server").forEach((button) => {
+    const active = button.dataset.server === server;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  $("status").textContent = server === "hypixel"
+    ? "Hypixel SkyBlock stats · official API adapter"
+    : "DonutSMP economy and PvP stats · live scraper";
 }
+
+document.querySelectorAll(".server").forEach((button) => {
+  button.addEventListener("click", () => setServer(button.dataset.server));
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const username = $("username").value.trim();
-  if (!username) return;
+  if (!username) {
+    $("status").textContent = "Enter a Minecraft username.";
+    $("status").className = "status error";
+    return;
+  }
   button.disabled = true;
-  $("status").textContent = "Fetching live stats…";
+  $("status").textContent = `Fetching ${currentServer === "donut" ? "DonutSMP" : "Hypixel"} stats…`;
   $("status").className = "status";
-  $("profile").classList.remove("show");
   try {
-    const result = await getStats(username);
-    const data = result.data;
-    $("avatar").src = data.avatar;
-    $("avatar").alt = data.username;
-    $("name").textContent = data.name || data.username;
-    $("handle").textContent = `@${data.username}${result.cached ? " · cached" : " · live"}`;
-    const values = [
-      ["Followers", data.stats.followers], ["Public repos", data.stats.publicRepos],
-      ["Total stars", data.stats.totalStars], ["Total forks", data.stats.totalForks],
-      ["Following", data.stats.following], ["Owned repos", data.stats.ownedRepos],
-      ["Open issues", data.stats.openIssues], ["Gists", data.stats.publicGists]
-    ];
-    $("stats").innerHTML = values.map(([label, value]) =>
-      `<div class="card"><div class="value">${Number(value).toLocaleString()}</div><div class="label">${label}</div></div>`
-    ).join("");
-    $("repos").innerHTML = data.topRepos.length
-      ? data.topRepos.map((repo) => `<article class="repo"><a href="${esc(repo.url)}" target="_blank" rel="noreferrer">${esc(repo.name)}</a><p>${esc(repo.description || "No description")}</p><small>★ ${repo.stars} · ⑂ ${repo.forks}${repo.language ? ` · ${esc(repo.language)}` : ""}</small></article>`).join("")
-      : "<div class='repo'>No public repositories found.</div>";
-    $("endpoint").textContent = result.endpoint;
-    $("profile").classList.add("show");
-    $("status").textContent = "";
+    const response = await fetch(`${apiBase}/api/minecraft/${currentServer}/${encodeURIComponent(username)}`);
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "Stats request failed");
+    render(body.data, body.cached);
+    $("status").textContent = body.cached ? "Showing cached stats · refreshes automatically" : "Live stats loaded";
   } catch (error) {
+    $("result").classList.remove("show");
     $("status").textContent = error.message;
     $("status").className = "status error";
   } finally {
@@ -91,4 +60,23 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
-form.requestSubmit();
+function render(data, cached) {
+  $("skin").src = data.skinUrl || `https://mc-heads.net/avatar/${encodeURIComponent(data.username)}/128`;
+  $("skin").alt = `${data.username} Minecraft skin`;
+  $("player-name").textContent = data.username;
+  $("profile-status").textContent = `${data.status || "Unknown"} · ${data.server}${cached ? " · cached" : ""}`;
+  $("profile-source").textContent = `Live data from ${data.source || data.server}`;
+  $("profile-link").href = data.profileUrl || "#";
+  $("fetched-at").textContent = data.fetchedAt ? new Date(data.fetchedAt).toLocaleTimeString() : "";
+  const fields = labels[currentServer].filter(([key]) => data.stats && data.stats[key] !== undefined);
+  $("stats").innerHTML = fields.map(([key, label, icon]) =>
+    `<article class="card"><div class="label"><span class="icon">${icon}</span>${label}</div><div class="value">${escapeHTML(String(data.stats[key]))}</div></article>`
+  ).join("");
+  $("result").classList.add("show");
+}
+
+function escapeHTML(value) {
+  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
+}
+
+setServer("donut");
