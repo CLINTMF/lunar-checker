@@ -2,6 +2,8 @@
 
 Fast GitHub stats API with a lightweight HTML frontend and a Go standard-library backend.
 
+Live checker: https://cnvs_2vgsrdsg2r9c7tpz8ehe82scyn-00-3nkgazfu7nlrp.pike.replit.dev/
+
 ## Run
 
 ```bash
