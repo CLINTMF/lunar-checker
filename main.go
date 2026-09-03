@@ -1,7 +1,7 @@
 package main
 
 import (
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-//go:embed public/index.html
-var indexHTML []byte
+//go:embed index.html style.css app.js
+var frontendFiles embed.FS
 
 const (
 	defaultPort = "3000"
@@ -227,9 +227,13 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(r.URL.Path, "/")
 	switch path {
 	case "":
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(indexHTML)
+		s.serveFrontend(w, "index.html", "text/html; charset=utf-8")
+		return
+	case "style.css":
+		s.serveFrontend(w, "style.css", "text/css; charset=utf-8")
+		return
+	case "app.js":
+		s.serveFrontend(w, "app.js", "application/javascript; charset=utf-8")
 		return
 	case "health":
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "lunar-stats-api", "uptime": time.Since(started).String()})
@@ -247,6 +251,18 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "route not found"})
+}
+
+func (s *Server) serveFrontend(w http.ResponseWriter, name, contentType string) {
+	content, err := frontendFiles.ReadFile(name)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "frontend file not found"})
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content)
 }
 
 func (s *Server) respondStats(w http.ResponseWriter, username string) {
