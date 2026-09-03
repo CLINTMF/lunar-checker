@@ -3,12 +3,14 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
-	"sort"
-	"strconv"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -17,200 +19,199 @@ import (
 //go:embed index.html style.css app.js
 var frontendFiles embed.FS
 
-const (
-	defaultPort = "3000"
-	cacheTTL    = 60 * time.Second
-)
+const cacheTTL = 60 * time.Second
 
-type CacheEntry struct {
-	Data      GitHubStats
+var minecraftUsername = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,32}$`)
+
+type cacheEntry struct {
+	Data      any
 	ExpiresAt time.Time
 }
 
 type Server struct {
 	Client *http.Client
-	Token  string
 	Mu     sync.RWMutex
-	Cache  map[string]CacheEntry
+	Cache  map[string]cacheEntry
 }
 
-type Profile struct {
-	Login       string `json:"login"`
-	Name        string `json:"name"`
-	AvatarURL   string `json:"avatar_url"`
-	HTMLURL     string `json:"html_url"`
-	Bio         string `json:"bio"`
-	Company     string `json:"company"`
-	Location    string `json:"location"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
-	Followers   int    `json:"followers"`
-	Following   int    `json:"following"`
-	PublicRepos int    `json:"public_repos"`
-	PublicGists int    `json:"public_gists"`
+type MinecraftStats struct {
+	OK         bool              `json:"ok"`
+	Server     string            `json:"server"`
+	Username   string            `json:"username"`
+	ProfileURL string            `json:"profileUrl"`
+	SkinURL    string            `json:"skinUrl"`
+	Status     string            `json:"status"`
+	Source     string            `json:"source"`
+	Stats      map[string]string `json:"stats"`
+	FetchedAt  string            `json:"fetchedAt"`
 }
 
-type Repo struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	HTMLURL     string `json:"html_url"`
-	Stars       int    `json:"stargazers_count"`
-	Forks       int    `json:"forks_count"`
-	OpenIssues  int    `json:"open_issues_count"`
-	Language    string `json:"language"`
-	UpdatedAt   string `json:"updated_at"`
-	Fork        bool   `json:"fork"`
+type apiError struct {
+	Status  int
+	Message string
 }
 
-type GitHubStats struct {
-	Platform   string         `json:"platform"`
-	Username   string         `json:"username"`
-	Name       string         `json:"name"`
-	Avatar     string         `json:"avatar"`
-	ProfileURL string         `json:"profileUrl"`
-	Bio        string         `json:"bio"`
-	Company    string         `json:"company"`
-	Location   string         `json:"location"`
-	CreatedAt  string         `json:"createdAt"`
-	UpdatedAt  string         `json:"updatedAt"`
-	Stats      StatSet        `json:"stats"`
-	Languages  map[string]int `json:"languages"`
-	TopRepos   []RepoView     `json:"topRepos"`
-	FetchedAt  string         `json:"fetchedAt"`
-}
+func (e *apiError) Error() string { return e.Message }
 
-type StatSet struct {
-	Followers   int `json:"followers"`
-	Following   int `json:"following"`
-	PublicRepos int `json:"publicRepos"`
-	PublicGists int `json:"publicGists"`
-	TotalStars  int `json:"totalStars"`
-	TotalForks  int `json:"totalForks"`
-	OpenIssues  int `json:"openIssues"`
-	OwnedRepos  int `json:"ownedRepos"`
-}
-
-type RepoView struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	URL         string `json:"url"`
-	Stars       int    `json:"stars"`
-	Forks       int    `json:"forks"`
-	Language    string `json:"language"`
-	UpdatedAt   string `json:"updatedAt"`
-}
-
-func (s *Server) githubRequest(path string, result any) error {
-	req, err := http.NewRequest(http.MethodGet, "https://api.github.com"+path, nil)
+func (s *Server) fetchText(endpoint string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "lunar-stats-api/1.0")
-	if s.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+s.Token)
-	}
-
+	req.Header.Set("Accept", "text/html, text/plain, application/json")
+	req.Header.Set("User-Agent", "Lunar-Checker/1.0")
 	resp, err := s.Client.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("not found")
+		return "", &apiError{Status: http.StatusNotFound, Message: "player not found"}
 	}
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("rate limited")
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
+		return "", &apiError{Status: http.StatusTooManyRequests, Message: "stats source rate limit reached"}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("github returned %s", resp.Status)
+		return "", &apiError{Status: http.StatusBadGateway, Message: fmt.Sprintf("stats source returned %s", resp.Status)}
 	}
-	return json.NewDecoder(resp.Body).Decode(result)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	return string(body), err
 }
 
-func (s *Server) getStats(username string) (GitHubStats, bool, error) {
-	key := strings.ToLower(username)
+func (s *Server) cached(key string, loader func() (any, error)) (any, bool, error) {
 	s.Mu.RLock()
-	entry, exists := s.Cache[key]
+	entry, ok := s.Cache[key]
 	s.Mu.RUnlock()
-	if exists && time.Now().Before(entry.ExpiresAt) {
+	if ok && time.Now().Before(entry.ExpiresAt) {
 		return entry.Data, true, nil
 	}
-
-	var profile Profile
-	var repos []Repo
-	var profileErr, reposErr error
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		profileErr = s.githubRequest("/users/"+username, &profile)
-	}()
-	go func() {
-		defer wg.Done()
-		reposErr = s.githubRequest("/users/"+username+"/repos?per_page=100&sort=updated", &repos)
-	}()
-	wg.Wait()
-	if profileErr != nil {
-		return GitHubStats{}, false, profileErr
-	}
-	if reposErr != nil {
-		return GitHubStats{}, false, reposErr
-	}
-
-	owned := make([]Repo, 0, len(repos))
-	languages := map[string]int{}
-	totalStars, totalForks, openIssues := 0, 0, 0
-	for _, repo := range repos {
-		if repo.Fork {
-			continue
-		}
-		owned = append(owned, repo)
-		totalStars += repo.Stars
-		totalForks += repo.Forks
-		openIssues += repo.OpenIssues
-		if repo.Language != "" {
-			languages[repo.Language]++
-		}
-	}
-	sort.Slice(owned, func(i, j int) bool {
-		if owned[i].Stars == owned[j].Stars {
-			return owned[i].Forks > owned[j].Forks
-		}
-		return owned[i].Stars > owned[j].Stars
-	})
-	top := make([]RepoView, 0, min(10, len(owned)))
-	for _, repo := range owned[:min(10, len(owned))] {
-		top = append(top, RepoView{
-			Name: repo.Name, Description: repo.Description, URL: repo.HTMLURL,
-			Stars: repo.Stars, Forks: repo.Forks, Language: repo.Language, UpdatedAt: repo.UpdatedAt,
-		})
-	}
-	data := GitHubStats{
-		Platform: "github", Username: profile.Login, Name: profile.Name,
-		Avatar: profile.AvatarURL, ProfileURL: profile.HTMLURL, Bio: profile.Bio,
-		Company: profile.Company, Location: profile.Location, CreatedAt: profile.CreatedAt,
-		UpdatedAt: profile.UpdatedAt, Languages: languages, TopRepos: top,
-		Stats: StatSet{
-			Followers: profile.Followers, Following: profile.Following,
-			PublicRepos: profile.PublicRepos, PublicGists: profile.PublicGists,
-			TotalStars: totalStars, TotalForks: totalForks, OpenIssues: openIssues,
-			OwnedRepos: len(owned),
-		},
-		FetchedAt: time.Now().UTC().Format(time.RFC3339),
+	data, err := loader()
+	if err != nil {
+		return nil, false, err
 	}
 	s.Mu.Lock()
-	s.Cache[key] = CacheEntry{Data: data, ExpiresAt: time.Now().Add(cacheTTL)}
+	s.Cache[key] = cacheEntry{Data: data, ExpiresAt: time.Now().Add(cacheTTL)}
 	s.Mu.Unlock()
 	return data, false, nil
 }
 
+func readMetric(page, heading string) string {
+	pattern := `(?ms)###\s+` + regexp.QuoteMeta(heading) + `\s*\n+\s*([^\n]+)`
+	match := regexp.MustCompile(pattern).FindStringSubmatch(page)
+	if len(match) < 2 {
+		return "0"
+	}
+	return strings.TrimSpace(match[1])
+}
+
+func readStatus(page string) string {
+	status := regexp.MustCompile(`(?m)^(Online|Offline)$`).FindStringSubmatch(page)
+	if len(status) == 2 {
+		return status[1]
+	}
+	return "Unknown"
+}
+
+func (s *Server) scrapeDonut(username string) (MinecraftStats, error) {
+	source := "https://r.jina.ai/http://www.donutstats.net/player/" +
+		url.PathEscape(username) + "?ref=player-stats"
+	page, err := s.fetchText(source)
+	if err != nil {
+		return MinecraftStats{}, err
+	}
+	if strings.Contains(page, "No player named") || strings.Contains(page, "no stats to show") {
+		return MinecraftStats{}, &apiError{Status: http.StatusNotFound, Message: "player has no DonutSMP stats"}
+	}
+	if !strings.Contains(page, "DonutSMP Player Stats") {
+		return MinecraftStats{}, errors.New("DonutSMP returned an unreadable player page")
+	}
+
+	kills := readMetric(page, "Kills")
+	deaths := readMetric(page, "Deaths")
+	kd := regexp.MustCompile(`K/D:\s*([0-9.]+)`).FindStringSubmatch(page)
+	kdValue := "0"
+	if len(kd) == 2 {
+		kdValue = kd[1]
+	}
+	return MinecraftStats{
+		OK: true, Server: "DonutSMP", Username: username,
+		ProfileURL: "https://www.donutstats.net/player/" + url.PathEscape(username),
+		SkinURL:    "https://mc-heads.net/avatar/" + url.PathEscape(username) + "/128",
+		Status:     readStatus(page), Source: "DonutStats",
+		Stats: map[string]string{
+			"money":        readMetric(page, "Money"),
+			"shards":       readMetric(page, "Shards"),
+			"playtime":     readMetric(page, "Playtime"),
+			"kills":        kills,
+			"deaths":       deaths,
+			"kd":           kdValue,
+			"blocksPlaced": readMetric(page, "Blocks Placed"),
+			"blocksBroken": readMetric(page, "Blocks Broken"),
+			"mobsKilled":   readMetric(page, "Mobs Killed"),
+			"moneySpent":   readMetric(page, "Money Spent"),
+			"moneyMade":    readMetric(page, "Money Made"),
+		},
+		FetchedAt: time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func (s *Server) scrapeHypixel(username string) (MinecraftStats, error) {
+	if os.Getenv("HYPIXEL_API_KEY") == "" {
+		return MinecraftStats{}, &apiError{
+			Status:  http.StatusNotImplemented,
+			Message: "Hypixel stats require a HYPIXEL_API_KEY secret",
+		}
+	}
+	return MinecraftStats{}, &apiError{
+		Status:  http.StatusNotImplemented,
+		Message: "Hypixel adapter is ready for the official API key",
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+func (s *Server) serveFrontend(w http.ResponseWriter, name, contentType string) {
+	content, err := frontendFiles.ReadFile(name)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "frontend file not found"})
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content)
+}
+
+func (s *Server) respondStats(w http.ResponseWriter, serverName, username string) {
+	if !minecraftUsername.MatchString(username) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid Minecraft username"})
+		return
+	}
+	key := strings.ToLower(serverName + ":" + username)
+	data, cached, err := s.cached(key, func() (any, error) {
+		if serverName == "donut" {
+			return s.scrapeDonut(username)
+		}
+		if serverName == "hypixel" {
+			return s.scrapeHypixel(username)
+		}
+		return nil, &apiError{Status: http.StatusNotFound, Message: "unsupported Minecraft server"}
+	})
+	if err != nil {
+		status := http.StatusBadGateway
+		if apiErr, ok := err.(*apiError); ok {
+			status = apiErr.Status
+		}
+		writeJSON(w, status, map[string]any{"ok": false, "error": err.Error(), "server": serverName})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cached": cached, "data": data})
 }
 
 func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
@@ -236,79 +237,32 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 		s.serveFrontend(w, "app.js", "application/javascript; charset=utf-8")
 		return
 	case "health":
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "lunar-stats-api", "uptime": time.Since(started).String()})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "lunar-checker", "source": "Minecraft stats"})
 		return
 	}
 	parts := strings.Split(path, "/")
-	if len(parts) == 3 && (parts[0] == "stats" || parts[0] == "github") && parts[1] == "github" {
-		// /stats/github/:username
-		s.respondStats(w, parts[2])
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "minecraft" {
+		s.respondStats(w, parts[2], parts[3])
 		return
 	}
-	if len(parts) == 2 && parts[0] == "github" {
-		// /github/:username
-		s.respondStats(w, parts[1])
+	if len(parts) == 3 && parts[0] == "api" && (parts[1] == "donut" || parts[1] == "hypixel") {
+		s.respondStats(w, parts[1], parts[2])
 		return
 	}
 	writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "route not found"})
 }
 
-func (s *Server) serveFrontend(w http.ResponseWriter, name, contentType string) {
-	content, err := frontendFiles.ReadFile(name)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "frontend file not found"})
-		return
-	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "public, max-age=300")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(content)
-}
-
-func (s *Server) respondStats(w http.ResponseWriter, username string) {
-	if username == "" || strings.ContainsAny(username, "/?#") {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "valid GitHub username required"})
-		return
-	}
-	data, cached, err := s.getStats(username)
-	if err != nil {
-		status := http.StatusBadGateway
-		message := "could not fetch GitHub stats"
-		if err.Error() == "not found" {
-			status, message = http.StatusNotFound, "GitHub user not found"
-		} else if err.Error() == "rate limited" {
-			status, message = http.StatusTooManyRequests, "GitHub rate limit reached"
-		}
-		writeJSON(w, status, map[string]any{"ok": false, "error": message})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cached": cached, "data": data})
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-var started = time.Now()
-
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = defaultPort
+		port = "3000"
 	}
-	if _, err := strconv.Atoi(port); err != nil {
-		log.Fatalf("invalid PORT: %s", port)
+	s := &Server{
+		Client: &http.Client{Timeout: 12 * time.Second},
+		Cache:  make(map[string]cacheEntry),
 	}
-	server := &Server{
-		Client: &http.Client{Timeout: 5 * time.Second},
-		Token:  os.Getenv("GITHUB_TOKEN"),
-		Cache:  make(map[string]CacheEntry),
-	}
-	http.HandleFunc("/", server.handler)
+	http.HandleFunc("/", s.handler)
 	log.Printf("Lunar Checker listening on http://0.0.0.0:%s", port)
-	log.Printf("GitHub token: %t", server.Token != "")
+	log.Printf("Minecraft stats scraper: DonutSMP enabled")
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
