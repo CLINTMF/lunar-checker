@@ -1,0 +1,7 @@
+# Go
+/lunar-stats-api
+*.test
+
+# Local environment
+.env
+.DS_Store
