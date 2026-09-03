@@ -1,8 +1,11 @@
 # Lunar Checker
 
-Fast GitHub stats API with a lightweight HTML frontend and a Go standard-library backend.
+Real Minecraft player stats scraper with a fast Go backend and a dark web frontend.
 
-Live checker: https://cnvs_2vgsrdsg2r9c7tpz8ehe82scyn-00-3nkgazfu7nlrp.pike.replit.dev/
+## Supported servers
+
+- **DonutSMP** — live public scrape through DonutStats, including money, shards, playtime, kills, deaths, K/D, blocks, mobs, and money flow.
+- **Hypixel SkyBlock** — adapter endpoint is included and returns a clear configuration response until `HYPIXEL_API_KEY` is added as a server secret.
 
 ## Run
 
@@ -10,43 +13,31 @@ Live checker: https://cnvs_2vgsrdsg2r9c7tpz8ehe82scyn-00-3nkgazfu7nlrp.pike.repl
 go run .
 ```
 
-The port defaults to `3000`. Set `PORT` when the host provides one:
+The server defaults to port `3000`:
 
 ```bash
 PORT=8080 go run .
 ```
 
-## Endpoints
+## API
 
 ```text
-GET /
 GET /health
-GET /stats/github/:username
-GET /github/:username
+GET /api/minecraft/donut/:username
+GET /api/minecraft/hypixel/:username
 ```
 
 Example:
 
 ```bash
-curl http://localhost:3000/stats/github/AnnonumusCDev
+curl http://localhost:3000/api/minecraft/donut/LoadFc
 ```
 
-The response includes profile data, followers, following, public repositories, total stars, total forks, open issues, language counts, and the top repositories.
+The API validates usernames, fetches the source server-side, caches results for
+60 seconds, and never exposes server secrets to the browser.
 
-## Notes
+## GitHub Pages
 
-- Set `GITHUB_TOKEN` as a server secret for the higher authenticated GitHub API rate limit.
-- The in-memory cache is 60 seconds and duplicate profile/repository calls run in parallel.
-- GitHub Pages can host the HTML but cannot run the Go server. Use a forwarded Codespaces port or a server host such as Railway for the API.
-
-## GitHub Pages frontend
-
-The `public/` folder is ready for GitHub Pages and `.github/workflows/pages.yml`
-deploys it automatically after you push to `main`. Because Pages is static, pass
-the URL of your running Go API in the page URL:
-
-```text
-https://YOUR-USER.github.io/YOUR-REPO/?api=https://YOUR-GO-API.example.com
-```
-
-When the frontend and API are served from the same origin, no `api` parameter is needed.
+GitHub Pages can host the static landing page, but it cannot run the Go scraper.
+Use the live Go service for the complete interactive checker, or pass its URL to
+the frontend with `?api=https://your-api-host.example.com`.
